@@ -949,7 +949,7 @@
       if (!target) return;
       const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
       events.forEach((name) => {
-        target.dispatchEvent(new MouseEvent(name, { bubbles: true, cancelable: true, view: window }));
+        target.dispatchEvent(new MouseEvent(name, { bubbles: true, cancelable: true }));
       });
     }
 
