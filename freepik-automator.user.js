@@ -40,7 +40,7 @@
     promptsText: '',
     aspectRatio: 'keep',
     quality: 'keep',
-    autoDownload: true,
+    autoDownload: false,
     autoApplyModel: true,
     autoOpenPersonalization: true,
     minWaitBeforeDownloadMs: 9000,
@@ -1106,59 +1106,27 @@
     return score;
   }
 
-  async function waitForNewImageAndDownload(cfg, baselineSignatures, baselineImageSignatures, generatedAtMs) {
+  async function waitForGenerationToComplete(cfg, generatedAtMs) {
     const timeoutMs = Math.max(30, Number(cfg.maxWaitPerImageSec) || 180) * 1000;
-    const minWaitMs = Math.max(4000, Number(cfg.minWaitBeforeDownloadMs) || DEFAULTS.minWaitBeforeDownloadMs);
-    let generationSeen = false;
+    let seenGenerating = false;
 
-    const newCandidate = await waitFor(() => {
-      if (hasGenerationInProgress()) generationSeen = true;
-
+    const done = await waitFor(() => {
       const elapsed = Date.now() - generatedAtMs;
-      const newImages = getResultImages({ visibleOnly: true })
-        .map((img) => ({
-          imageEl: img,
-          signature: buildImageSignature(img),
-          score: scoreResultImageCandidate(img)
-        }))
-        .filter((item) => item.signature && !baselineImageSignatures.has(item.signature))
-        .sort((a, b) => b.score - a.score);
+      const inProgress = hasGenerationInProgress();
+      if (inProgress) seenGenerating = true;
 
-      const now = getDownloadButtons({ visibleOnly: true })
-        .map((btn) => ({
-          btn,
-          signature: buildDownloadSignature(btn),
-          score: scoreDownloadButtonCandidate(btn)
-        }))
-        .filter((item) => item.signature && !baselineSignatures.has(item.signature))
-        .filter((item) => !isLikelyGlobalTab(item.btn));
+      if (!seenGenerating) return null;
+      // Evita falso positivo logo apos clicar em Gerar.
+      if (elapsed < 3000) return null;
+      if (inProgress) return null;
+      return true;
+    }, timeoutMs, 900);
 
-      if (!generationSeen && elapsed < minWaitMs) return null;
-      if (elapsed < minWaitMs) return null;
-
-      if (newImages.length) {
-        return { type: 'image', imageEl: newImages[0].imageEl };
-      }
-
-      if (!now.length) return null;
-
-      now.sort((a, b) => b.score - a.score);
-      return { type: 'downloadButton', btn: now[0].btn };
-    }, timeoutMs, 1200);
-
-    if (!newCandidate) {
+    if (!done) {
       throw new Error('Tempo esgotado esperando a imagem finalizar.');
     }
 
-    if (!cfg.autoDownload) {
-      log('Imagem pronta. Auto-download desativado.');
-      return;
-    }
-
-    const ok = await triggerImageDownload(newCandidate);
-    if (!ok) {
-      throw new Error('Imagem pronta, mas nao encontrei botao de download.');
-    }
+    log('Imagem finalizada.');
   }
 
   function parsePrompts(text) {
@@ -1186,7 +1154,7 @@
       promptsText: ui.prompts.value,
       aspectRatio: ui.aspectRatio.value,
       quality: ui.quality.value,
-      autoDownload: ui.autoDownload.checked,
+      autoDownload: false,
       autoApplyModel: ui.autoApplyModel.checked,
       autoOpenPersonalization: ui.autoOpenPersonalization.checked,
       delayBetweenPromptsMs: Math.max(300, Number(ui.delayBetweenPromptsMs.value) || DEFAULTS.delayBetweenPromptsMs),
@@ -1203,7 +1171,6 @@
     ui.modelCustom.disabled = isRunning;
     ui.aspectRatio.disabled = isRunning;
     ui.quality.disabled = isRunning;
-    ui.autoDownload.disabled = isRunning;
     ui.autoApplyModel.disabled = isRunning;
     ui.autoOpenPersonalization.disabled = isRunning;
     ui.delayBetweenPromptsMs.disabled = isRunning;
@@ -1251,10 +1218,8 @@
           log(`(${i + 1}/${prompts.length}) Enviando prompt...`);
           await putPrompt(prompt);
 
-          const baselineSignatures = getDownloadSignatureSet({ visibleOnly: false });
-          const baselineImageSignatures = getImageSignatureSet({ visibleOnly: false });
           const generatedAt = await clickGenerate();
-          await waitForNewImageAndDownload(cfg, baselineSignatures, baselineImageSignatures, generatedAt);
+          await waitForGenerationToComplete(cfg, generatedAt);
         } catch (err) {
           log(`Falha no prompt ${i + 1}: ${err?.message || err}`);
         }
@@ -1517,7 +1482,6 @@
             quality: existing.querySelector('#mbr-quality'),
             delayBetweenPromptsMs: existing.querySelector('#mbr-delay'),
             maxWaitPerImageSec: existing.querySelector('#mbr-timeout'),
-            autoDownload: existing.querySelector('#mbr-autodl'),
             autoApplyModel: existing.querySelector('#mbr-automodel'),
             autoOpenPersonalization: existing.querySelector('#mbr-autopers'),
             youtubeBtn: existing.querySelector('#mbr-youtube'),
@@ -1592,7 +1556,6 @@
       </div>
 
       <div class="checks">
-        <label class="check"><input id="mbr-autodl" type="checkbox" /><span>Auto-download</span></label>
         <label class="check"><input id="mbr-automodel" type="checkbox" /><span>Aplicar modelo automatico</span></label>
         <label class="check"><input id="mbr-autopers" type="checkbox" /><span>Abrir aba de personalizacao antes de aplicar opcoes</span></label>
       </div>
@@ -1628,7 +1591,6 @@
       quality: panel.querySelector('#mbr-quality'),
       delayBetweenPromptsMs: panel.querySelector('#mbr-delay'),
       maxWaitPerImageSec: panel.querySelector('#mbr-timeout'),
-      autoDownload: panel.querySelector('#mbr-autodl'),
       autoApplyModel: panel.querySelector('#mbr-automodel'),
       autoOpenPersonalization: panel.querySelector('#mbr-autopers'),
       youtubeBtn: panel.querySelector('#mbr-youtube'),
@@ -1648,7 +1610,6 @@
     ui.quality.value = cfg.quality;
     ui.delayBetweenPromptsMs.value = cfg.delayBetweenPromptsMs;
     ui.maxWaitPerImageSec.value = cfg.maxWaitPerImageSec;
-    ui.autoDownload.checked = cfg.autoDownload;
     ui.autoApplyModel.checked = cfg.autoApplyModel;
     ui.autoOpenPersonalization.checked = cfg.autoOpenPersonalization;
 
@@ -1664,7 +1625,6 @@
       ui.quality,
       ui.delayBetweenPromptsMs,
       ui.maxWaitPerImageSec,
-      ui.autoDownload,
       ui.autoApplyModel,
       ui.autoOpenPersonalization
     ].forEach((el) => el.addEventListener('change', autoSave));
