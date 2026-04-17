@@ -580,6 +580,87 @@
     return null;
   }
 
+  function revealActionsNearElement(el) {
+    if (!el) return;
+    const targets = [el, el.parentElement, el.closest('article, figure, li, [data-testid], div')].filter(Boolean);
+    for (const target of targets) {
+      const events = ['mouseenter', 'mouseover', 'mousemove'];
+      events.forEach((name) => {
+        target.dispatchEvent(new MouseEvent(name, { bubbles: true, cancelable: true }));
+      });
+    }
+  }
+
+  function findMenuButtonNearElement(el) {
+    if (!el) return null;
+
+    let node = el;
+    for (let depth = 0; depth < 6 && node; depth += 1) {
+      const menuCandidates = Array.from(node.querySelectorAll([
+        'button[aria-haspopup="menu"]',
+        '[role="button"][aria-haspopup="menu"]',
+        'button[data-testid*="menu" i]',
+        'button[data-testid*="more" i]',
+        '[aria-label*="menu" i]',
+        '[aria-label*="more" i]',
+        '[aria-label*="options" i]',
+        '[aria-label*="mais" i]',
+        '[title*="menu" i]',
+        '[title*="more" i]',
+        '[title*="options" i]'
+      ].join(',')))
+        .filter((btn) => isVisible(btn) && !isRunnerElement(btn))
+        .filter((btn) => !isLikelyGlobalTab(btn));
+
+      if (menuCandidates.length) {
+        const refRect = el.getBoundingClientRect();
+        const ranked = menuCandidates
+          .map((btn) => {
+            const rect = btn.getBoundingClientRect();
+            const dx = (rect.left + rect.width / 2) - (refRect.right - 10);
+            const dy = (rect.top + rect.height / 2) - (refRect.top + 12);
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            return { btn, dist };
+          })
+          .sort((a, b) => a.dist - b.dist);
+        return ranked[0].btn;
+      }
+
+      node = node.parentElement;
+    }
+
+    return null;
+  }
+
+  async function tryDownloadFromAssetMenu(imageEl) {
+    if (!imageEl) return false;
+
+    revealActionsNearElement(imageEl);
+    await sleep(220);
+
+    const menuBtn = findMenuButtonNearElement(imageEl);
+    if (!menuBtn) return false;
+
+    await humanClick(menuBtn);
+    await sleep(260);
+
+    const menuDownload = await waitFor(() => findClickableByTexts([
+      'download',
+      'baixar'
+    ], {
+      tokenMatch: true,
+      maxTextLength: 120,
+      reject: (el, t) => isLikelyGlobalTab(el, t)
+    }), 2800, 160);
+
+    if (!menuDownload) return false;
+
+    await humanClick(menuDownload);
+    log('Download acionado (menu do card).');
+    await clickSecondaryDownloadOption(menuDownload);
+    return true;
+  }
+
   async function clickSecondaryDownloadOption(exceptButton = null) {
     await sleep(800);
     const secondary = findClickableByTexts([
@@ -613,6 +694,9 @@
     }
 
     if (candidate.type === 'image' && candidate.imageEl) {
+      revealActionsNearElement(candidate.imageEl);
+      await sleep(200);
+
       const nearBtn = findDownloadButtonNearElement(candidate.imageEl);
       if (nearBtn) {
         await humanClick(nearBtn);
@@ -620,6 +704,9 @@
         await clickSecondaryDownloadOption(nearBtn);
         return true;
       }
+
+      const byMenu = await tryDownloadFromAssetMenu(candidate.imageEl);
+      if (byMenu) return true;
 
       const previewTarget = candidate.imageEl.closest('a, button, [role="button"]') || candidate.imageEl;
       await humanClick(previewTarget);
