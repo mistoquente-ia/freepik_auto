@@ -1,4 +1,4 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         @andrevidmob
 // @namespace    https://tampermonkey.net/
 // @version      1.0.0
@@ -468,8 +468,8 @@
   }
 
   function getDownloadButtons(options = {}) {
-    const { visibleOnly = true } = options;
-    const candidates = Array.from(document.querySelectorAll([
+    const { visibleOnly = true, root = document } = options;
+    const candidates = Array.from((root || document).querySelectorAll([
       'button',
       'a',
       '[role="button"]',
@@ -487,6 +487,55 @@
       const t = textFromElement(el);
       return t.includes('download') || t.includes('baixar');
     });
+  }
+
+  function getResultImages(options = {}) {
+    const { visibleOnly = true, root = document } = options;
+    const imgs = Array.from((root || document).querySelectorAll('img'));
+    return imgs.filter((img) => {
+      if (!(img instanceof HTMLImageElement)) return false;
+      if (isRunnerElement(img)) return false;
+      if (visibleOnly && !isVisible(img)) return false;
+
+      const rect = img.getBoundingClientRect();
+      if (rect.width < 96 || rect.height < 96) return false;
+
+      const src = normalize(img.currentSrc || img.src || '');
+      if (!src) return false;
+      if (src.includes('avatar') || src.includes('logo')) return false;
+      return true;
+    });
+  }
+
+  function buildImageSignature(img) {
+    if (!img) return '';
+    const rect = img.getBoundingClientRect();
+    const src = img.currentSrc || img.src || '';
+    const parentHref = img.closest('a')?.getAttribute('href') || '';
+    const holder = img.closest('[data-testid], article, figure, li, div');
+    const holderId = holder?.getAttribute?.('data-testid') || '';
+    const alt = img.getAttribute('alt') || '';
+    return normalize(`${src}|${parentHref}|${holderId}|${Math.round(rect.width)}x${Math.round(rect.height)}|${alt}`);
+  }
+
+  function getImageSignatureSet(options = {}) {
+    return new Set(
+      getResultImages(options)
+        .map((img) => buildImageSignature(img))
+        .filter(Boolean)
+    );
+  }
+
+  function scoreResultImageCandidate(img) {
+    const rect = img.getBoundingClientRect();
+    const context = textFromElement(img.closest('[data-testid], article, figure, li, div') || img);
+    let score = 0;
+    if (context.includes('just now') || context.includes('agora') || context.includes('sec') || context.includes('s ago')) {
+      score += 120;
+    }
+    score += Math.min(80, Math.round((rect.width * rect.height) / 5000));
+    score += Math.max(0, 45 - Math.floor(Math.abs(rect.top) / 28));
+    return score;
   }
 
   function buildDownloadSignature(button) {
@@ -510,6 +559,91 @@
         .map((btn) => buildDownloadSignature(btn))
         .filter(Boolean)
     );
+  }
+
+  function findDownloadButtonNearElement(el) {
+    if (!el) return null;
+
+    let node = el;
+    for (let depth = 0; depth < 6 && node; depth += 1) {
+      const candidates = getDownloadButtons({ visibleOnly: true, root: node })
+        .filter((btn) => !isLikelyGlobalTab(btn));
+      if (candidates.length) {
+        const ranked = candidates
+          .map((btn) => ({ btn, score: scoreDownloadButtonCandidate(btn) }))
+          .sort((a, b) => b.score - a.score);
+        return ranked[0].btn;
+      }
+      node = node.parentElement;
+    }
+
+    return null;
+  }
+
+  async function clickSecondaryDownloadOption(exceptButton = null) {
+    await sleep(800);
+    const secondary = findClickableByTexts([
+      'download',
+      'baixar',
+      'original',
+      'png',
+      'jpg'
+    ], {
+      tokenMatch: true,
+      maxTextLength: 120,
+      reject: (el, t) => isLikelyGlobalTab(el, t)
+    });
+
+    if (secondary && secondary !== exceptButton) {
+      await humanClick(secondary);
+      log('Opcao secundaria de download acionada.');
+      return true;
+    }
+    return false;
+  }
+
+  async function triggerImageDownload(candidate) {
+    if (!candidate) return false;
+
+    if (candidate.type === 'downloadButton' && candidate.btn) {
+      await humanClick(candidate.btn);
+      log('Download acionado (botao direto).');
+      await clickSecondaryDownloadOption(candidate.btn);
+      return true;
+    }
+
+    if (candidate.type === 'image' && candidate.imageEl) {
+      const nearBtn = findDownloadButtonNearElement(candidate.imageEl);
+      if (nearBtn) {
+        await humanClick(nearBtn);
+        log('Download acionado (card).');
+        await clickSecondaryDownloadOption(nearBtn);
+        return true;
+      }
+
+      const previewTarget = candidate.imageEl.closest('a, button, [role="button"]') || candidate.imageEl;
+      await humanClick(previewTarget);
+      await sleep(650);
+
+      const previewDownload = await waitFor(() => findClickableByTexts([
+        'download',
+        'baixar'
+      ], {
+        tokenMatch: true,
+        avoidContainers: false,
+        maxTextLength: 140,
+        reject: (el, t) => isLikelyGlobalTab(el, t)
+      }), 5500, 240);
+
+      if (!previewDownload) return false;
+
+      await humanClick(previewDownload);
+      log('Download acionado (preview).');
+      await clickSecondaryDownloadOption(previewDownload);
+      return true;
+    }
+
+    return false;
   }
 
   function isLikelyGlobalTab(el, normalizedText = '') {
@@ -885,15 +1019,24 @@
     return score;
   }
 
-  async function waitForNewImageAndDownload(cfg, baselineSignatures, generatedAtMs) {
+  async function waitForNewImageAndDownload(cfg, baselineSignatures, baselineImageSignatures, generatedAtMs) {
     const timeoutMs = Math.max(30, Number(cfg.maxWaitPerImageSec) || 180) * 1000;
     const minWaitMs = Math.max(4000, Number(cfg.minWaitBeforeDownloadMs) || DEFAULTS.minWaitBeforeDownloadMs);
     let generationSeen = false;
 
-    const newDownloadButton = await waitFor(() => {
+    const newCandidate = await waitFor(() => {
       if (hasGenerationInProgress()) generationSeen = true;
 
       const elapsed = Date.now() - generatedAtMs;
+      const newImages = getResultImages({ visibleOnly: true })
+        .map((img) => ({
+          imageEl: img,
+          signature: buildImageSignature(img),
+          score: scoreResultImageCandidate(img)
+        }))
+        .filter((item) => item.signature && !baselineImageSignatures.has(item.signature))
+        .sort((a, b) => b.score - a.score);
+
       const now = getDownloadButtons({ visibleOnly: true })
         .map((btn) => ({
           btn,
@@ -903,15 +1046,20 @@
         .filter((item) => item.signature && !baselineSignatures.has(item.signature))
         .filter((item) => !isLikelyGlobalTab(item.btn));
 
-      if (!now.length) return null;
       if (!generationSeen && elapsed < minWaitMs) return null;
       if (elapsed < minWaitMs) return null;
 
+      if (newImages.length) {
+        return { type: 'image', imageEl: newImages[0].imageEl };
+      }
+
+      if (!now.length) return null;
+
       now.sort((a, b) => b.score - a.score);
-      return now[0].btn;
+      return { type: 'downloadButton', btn: now[0].btn };
     }, timeoutMs, 1200);
 
-    if (!newDownloadButton) {
+    if (!newCandidate) {
       throw new Error('Tempo esgotado esperando a imagem finalizar.');
     }
 
@@ -920,22 +1068,9 @@
       return;
     }
 
-    await humanClick(newDownloadButton);
-    log('Download acionado.');
-
-    // Alguns fluxos abrem um menu secundario de download
-    await sleep(800);
-    const secondary = findClickableByTexts([
-      'download',
-      'baixar',
-      'original',
-      'png',
-      'jpg'
-    ]);
-
-    if (secondary && secondary !== newDownloadButton) {
-      await humanClick(secondary);
-      log('Opcao secundaria de download acionada.');
+    const ok = await triggerImageDownload(newCandidate);
+    if (!ok) {
+      throw new Error('Imagem pronta, mas nao encontrei botao de download.');
     }
   }
 
@@ -1030,8 +1165,9 @@
           await putPrompt(prompt);
 
           const baselineSignatures = getDownloadSignatureSet({ visibleOnly: false });
+          const baselineImageSignatures = getImageSignatureSet({ visibleOnly: false });
           const generatedAt = await clickGenerate();
-          await waitForNewImageAndDownload(cfg, baselineSignatures, generatedAt);
+          await waitForNewImageAndDownload(cfg, baselineSignatures, baselineImageSignatures, generatedAt);
         } catch (err) {
           log(`Falha no prompt ${i + 1}: ${err?.message || err}`);
         }
